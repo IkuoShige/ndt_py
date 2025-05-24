@@ -1,55 +1,122 @@
-# 2D NDT Localization
+# 2D NDT Localization Simulator
 
-2次元の点群データに対するNormal Distribution Transform（NDT）を実装した自己位置推定システムです。このプロジェクトでは、占有格子地図上でのLiDARシミュレーションとNDTマッチングによる自己位置推定を行います。
+2D環境における**Normal Distribution Transform (NDT)**アルゴリズムを使用したローカライゼーションシミュレーターです。
 
-## 機能
+## 新機能：実際のロボットに近い現実的なシミュレーション
 
-- 2D占有格子地図（.pgm, .yaml形式）からの地図読み込み
-- LiDARセンサのシミュレーション
-- NDT（Normal Distribution Transform）による点群マッチング
-- Rerunを使用したリアルタイム可視化
+### realistic_ndt_localization.py - 現実的なNDTローカライゼーション
 
-## 環境構築
+実際のロボットに適応させることを想定した、より現実的なシミュレーション環境を提供します：
 
-このプロジェクトでは、Python仮想環境マネージャ「uv」を使用します。以下のコマンドで環境をセットアップしてください：
+#### 主な改良点
+
+1. **現実的なLiDARシミュレーション (`src/realistic_lidar_simulator.py`)**
+   - 距離依存ノイズモデル
+   - センサーの最小・最大検出距離制限
+   - ビーム発散による角度ばらつき
+   - 反射失敗とマルチパス反射
+   - 反射強度のシミュレーション
+   - センサー統計情報の提供
+
+2. **現実的なオドメトリーモデル (`src/robot_odometry.py`)**
+   - 車輪滑りとエンコーダー量子化誤差
+   - 系統的誤差と累積誤差
+   - キャリブレーション誤差（車輪間距離、半径等）
+   - ジャイロドリフト
+   - 不確実性の共分散行列計算
+
+3. **ROSメッセージ互換性 (`src/ros_compatibility.py`)**
+   - sensor_msgs/LaserScan
+   - nav_msgs/Odometry
+   - geometry_msgs/Pose, Transform
+   - nav_msgs/OccupancyGrid
+   - 将来的なROS統合を容易にするデータ構造
+
+4. **改良されたローカライゼーションフレームワーク**
+   - リアルタイム処理を想定した設計
+   - センサーフュージョン（LiDAR + オドメトリー）
+   - 不確実性の追跡と可視化
+   - 詳細な統計情報とエラー分析
+
+#### 使用方法
 
 ```bash
-# セットアップスクリプトを実行
-./setup.sh
+# 基本実行（現実的なノイズモデル有効）
+python realistic_ndt_localization.py --map_dir map --steps 100
 
-# または手動でセットアップ
-# uvのインストール
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# ニュートン法を使用
+python realistic_ndt_localization.py --map_dir map --newton --steps 100
 
-# 仮想環境の作成と有効化
-uv venv
-source .venv/bin/activate
+# 速度制限を調整
+python realistic_ndt_localization.py --map_dir map --max_velocity 0.3 --max_angular_velocity 0.5
 
-# 依存関係のインストール
-uv pip install -r requirements.txt
+# 低ノイズモード（従来モード）
+python realistic_ndt_localization.py --map_dir map --no-realistic_noise
 ```
 
-## 使い方
+#### 主要パラメータ
+
+- `--realistic_noise`: 現実的なノイズモデルを使用（デフォルト：有効）
+- `--max_velocity`: 最大線速度 [m/s]（デフォルト：0.5）
+- `--max_angular_velocity`: 最大角速度 [rad/s]（デフォルト：0.8）
+- `--newton`: ニュートン法を使用（デフォルト：勾配降下法）
+
+#### 出力情報
+
+シミュレーション終了時に以下の詳細統計が表示されます：
+
+```
+=== 最終結果 ===
+最終位置誤差: 0.1234 m
+最終角度誤差: 2.34 度
+平均位置誤差: 0.0567 m
+平均角度誤差: 1.23 度
+NDT成功率: 95.00%
+平均計算時間: 12.34 ms
+
+=== センサー統計 ===
+LiDAR検出率: 97.5%
+反射失敗率: 2.0%
+マルチパス率: 0.5%
+
+=== オドメトリー統計 ===
+累積移動距離: 25.67 m
+推定位置誤差: 0.0789 m
+推定角度誤差: 1.45 度
+```
+
+## 従来のシミュレーション
+
+### ndt_localization.py - 基本的なNDTローカライゼーション
+
+#### 使用方法
 
 ```bash
-# 仮想環境のアクティベーション
-source .venv/bin/activate
+# 基本的な実行
+python ndt_localization.py --map_dir map
 
-# プログラムの実行
-python ndt_localization.py --map_dir map --rerun --steps 100
+# ニュートン法を使用
+python ndt_localization.py --map_dir map --newton
+
+# 可視化を有効にして実行
+python ndt_localization.py --map_dir map --visualize
+
+# 軌道の種類を指定
+python ndt_localization.py --map_dir map --trajectory circular --radius 5.0
+python ndt_localization.py --map_dir map --trajectory spiral --radius 5.0 --end_radius 1.0
 ```
 
-### コマンドラインオプション
+#### コマンドラインオプション
 
 - `--map_dir`: マップファイル(.pgmと.yaml)が格納されているディレクトリ
 - `--visualize`: matplotlibで結果を可視化
-- `--steps`: シミュレーションのステップ数
-- `--rerun`: Rerunを使用して可視化（デフォルトはオン）
-- `--newton`: ニュートン法を使用してNDTマッチングを実行（デフォルトは勾配降下法）
+- `--steps`: シミュレーションのステップ数（デフォルト: 100）
+- `--rerun`: Rerunを使用して可視化（デフォルト: オン）
+- `--newton`: ニュートン法を使用してNDTマッチングを実行
 - `--damping`: ニュートン法のダンピング係数（デフォルト: 0.1）
-- `--trajectory`: 生成する軌道の種類（'random', 'circular', 'spiral'）
-- `--radius`: 円軌道またはらせん軌道の半径（デフォルト: 5.0m）
-- `--end_radius`: らせん軌道の終了半径（デフォルト: 1.0m）
+- `--trajectory`: 軌道の種類（random, circular, spiral）
+- `--radius`: 円軌道またはらせん軌道の半径（デフォルト: 5.0）
+- `--end_radius`: らせん軌道の終了半径（デフォルト: 1.0）
 
 ### 軌道の種類
 
@@ -104,18 +171,33 @@ NDTマッチングでは、以下の2つの最適化アルゴリズムを選択�
 
 ### 位置推定プロセス
 
+#### 従来のシミュレーション
 1. 真の位置からLiDARスキャンをシミュレート
 2. 前フレームの推定位置と移動量から初期推定値を設定
 3. NDTマッチングで変換パラメータを最適化
 4. 推定位置を更新
 5. Rerunで結果を可視化
 
+#### 現実的なシミュレーション
+1. 制御コマンドから現実的なオドメトリー誤差を計算
+2. 真の位置から現実的なLiDARスキャンをシミュレート
+3. オドメトリーとLiDARデータを統合してNDTマッチングの初期値を設定
+4. NDTマッチングで姿勢補正
+5. 不確実性を考慮した姿勢更新
+6. 詳細な統計情報の収集と可視化
+
 ## ファイル構成
 
-### コード
-- `ndt_localization.py`: メイン実行ファイル
+### 新しい現実的なシミュレーション
+- `realistic_ndt_localization.py`: 現実的なメイン実行ファイル
+- `src/realistic_lidar_simulator.py`: 現実的なLiDARシミュレーター
+- `src/robot_odometry.py`: 現実的なオドメトリーモデル
+- `src/ros_compatibility.py`: ROSメッセージ互換データ構造
+
+### 従来のシミュレーション
+- `ndt_localization.py`: 基本的なメイン実行ファイル
 - `src/occupancy_grid_map.py`: 占有格子地図を扱うクラス
-- `src/lidar_simulator.py`: LiDARシミュレータ
+- `src/lidar_simulator.py`: 基本的なLiDARシミュレータ
 - `src/ndt.py`: NDTアルゴリズムの実装
 
 ### ドキュメント
@@ -135,7 +217,24 @@ NDTマッチングでは、以下の2つの最適化アルゴリズムを選択�
 - Pillow: 画像処理（PGMファイルの読み込み）
 - scipy: 科学計算（行列演算など）
 
+## 実際のロボットへの適応について
+
+現実的なシミュレーション（`realistic_ndt_localization.py`）は、以下の点で実際のロボットシステムとの統合を容易にします：
+
+1. **ROSメッセージ互換性**: 標準的なROSメッセージ形式に対応
+2. **現実的なセンサーモデル**: 実際のセンサー特性を考慮
+3. **リアルタイム処理設計**: 実用的な計算時間と処理頻度
+4. **エラーハンドリング**: センサー故障やマッチング失敗に対する対処
+5. **統計情報**: システム性能の監視と調整に必要な情報
+
+将来的には、以下のような拡張が可能です：
+- ROSノードとしての実装
+- リアルタイムLiDARデータとの統合
+- 実際のオドメトリーデータとの統合
+- 動的環境や移動物体への対応
+
 ## 注意事項
 
 - このプロジェクトはRerun SDKバージョン0.23以降に対応しています
 - 古いバージョンのRerunでは、時間関連のAPI（`set_time_seconds`など）が異なる場合があります
+- 現実的なシミュレーションでは、計算負荷が高くなる場合があります
