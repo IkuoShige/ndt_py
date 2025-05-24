@@ -26,7 +26,8 @@ from src.realistic_lidar_simulator import RealisticLidarSimulator
 from src.robot_odometry import RobotOdometry, OdometryIntegrator
 from src.ndt import NDTMatcher
 from src.ros_compatibility import (
-    ROSMessageConverter, LaserScan, Odometry, NDTMatchingResult
+    ROS2MessageConverter, LaserScan, Odometry, NDTMatchingResult,
+    ROS2NodeManager, ROS2_AVAILABLE
 )
 
 def generate_realistic_trajectory(start_pose, steps=100, max_velocity=0.5, max_angular_velocity=0.8):
@@ -189,7 +190,40 @@ class RealisticNDTLocalizer:
         }
         
         # ROSメッセージコンバーター
-        self.ros_converter = ROSMessageConverter()
+        self.ros_converter = ROS2MessageConverter()
+        
+        # ROS 2ノード管理（ROS 2が利用可能な場合のみ）
+        self.ros2_enabled = config.get('enable_ros2', True) and ROS2_AVAILABLE
+        self.ros2_node_manager = None
+        self.publishers = {}
+        
+        if self.ros2_enabled:
+            try:
+                self.ros2_node_manager = ROS2NodeManager("realistic_ndt_localizer")
+                if self.ros2_node_manager.initialized:
+                    # パブリッシャーを作成
+                    self.publishers['scan'] = self.ros2_node_manager.create_publisher(
+                        LaserScan, '/scan', 10
+                    )
+                    self.publishers['odom'] = self.ros2_node_manager.create_publisher(
+                        Odometry, '/odom', 10
+                    )
+                    # ROS 2のgeometry_msgs.msgをインポート
+                    if ROS2_AVAILABLE:
+                        from geometry_msgs.msg import PoseWithCovarianceStamped
+                        self.publishers['amcl_pose'] = self.ros2_node_manager.create_publisher(
+                            PoseWithCovarianceStamped, '/amcl_pose', 10
+                        )
+                    print("ROS 2パブリッシャーを作成しました")
+                else:
+                    self.ros2_enabled = False
+                    print("ROS 2ノード初期化に失敗しました")
+            except Exception as e:
+                print(f"ROS 2ノード作成エラー: {e}")
+                self.ros2_enabled = False
+        
+        if not self.ros2_enabled:
+            print("スタンドアロンモードで動作します（ROS 2メッセージ配信なし）")
     
     def initialize_pose(self, initial_pose):
         """
@@ -244,6 +278,53 @@ class RealisticNDTLocalizer:
         
         # 統計情報を更新
         self._update_statistics(true_pose, ndt_result)
+        
+        # ROS 2メッセージを配信（ROS 2が有効な場合）
+        if self.ros2_enabled and self.ros2_node_manager and self.ros2_node_manager.initialized:
+            try:
+                # LiDARスキャンを配信
+                if 'scan' in self.publishers and self.publishers['scan']:
+                    self.publishers['scan'].publish(laser_scan_msg)
+                
+                # オドメトリーを配信
+                if 'odom' in self.publishers and self.publishers['odom']:
+                    odometry_msg_ros2 = self.ros_converter.create_odometry(
+                        self.odometry.get_pose(),
+                        np.array([linear_vel, angular_vel]),
+                        odom_uncertainty,
+                        frame_id="odom",
+                        child_frame_id="base_link"
+                    )
+                    self.publishers['odom'].publish(odometry_msg_ros2)
+                
+                # 推定姿勢を配信（AMCL互換）
+                if 'amcl_pose' in self.publishers and self.publishers['amcl_pose'] and ROS2_AVAILABLE:
+                    from geometry_msgs.msg import PoseWithCovarianceStamped
+                    pose_msg = PoseWithCovarianceStamped()
+                    pose_msg.header = self.ros_converter.create_header("map", current_time)
+                    pose_msg.pose.pose = self.ros_converter.pose_2d_to_ros(self.current_pose)
+                    
+                    # 共分散行列を設定
+                    pose_cov = [0.0] * 36
+                    if self.pose_covariance.shape == (3, 3):
+                        pose_cov[0] = float(self.pose_covariance[0, 0])   # x-x
+                        pose_cov[1] = float(self.pose_covariance[0, 1])   # x-y
+                        pose_cov[5] = float(self.pose_covariance[0, 2])   # x-yaw
+                        pose_cov[6] = float(self.pose_covariance[1, 0])   # y-x
+                        pose_cov[7] = float(self.pose_covariance[1, 1])   # y-y
+                        pose_cov[11] = float(self.pose_covariance[1, 2])  # y-yaw
+                        pose_cov[30] = float(self.pose_covariance[2, 0])  # yaw-x
+                        pose_cov[31] = float(self.pose_covariance[2, 1])  # yaw-y
+                        pose_cov[35] = float(self.pose_covariance[2, 2])  # yaw-yaw
+                    pose_msg.pose.covariance = pose_cov
+                    
+                    self.publishers['amcl_pose'].publish(pose_msg)
+                
+                # ROS 2ノードをスピン（メッセージの送受信を処理）
+                self.ros2_node_manager.spin_once(timeout_sec=0.001)
+                
+            except Exception as e:
+                print(f"ROS 2メッセージ配信エラー: {e}")
         
         # 結果を返す
         return {
@@ -435,7 +516,8 @@ def main():
         'wheel_base': 0.5,
         'odom_systematic_error': 0.03 if args.realistic_noise else 0.01,
         'odom_random_error': 0.02 if args.realistic_noise else 0.005,
-        'slip_factor': 0.08 if args.realistic_noise else 0.02
+        'slip_factor': 0.08 if args.realistic_noise else 0.02,
+        'enable_ros2': True
     }
     
     # ローカライザーの初期化
@@ -552,6 +634,19 @@ def main():
     print(f"累積移動距離: {odom_stats['cumulative_distance']:.2f} m")
     print(f"推定位置誤差: {odom_stats['position_error_estimate']:.4f} m")
     print(f"推定角度誤差: {np.degrees(odom_stats['angle_error_estimate']):.4f} 度")
+    
+    # ROS 2ノードのシャットダウン
+    if localizer.ros2_enabled and localizer.ros2_node_manager:
+        print("\nROS 2ノードをシャットダウンしています...")
+        localizer.ros2_node_manager.shutdown()
+        print("ROS 2ノードのシャットダウンが完了しました")
 
 if __name__ == "__main__":
-    main() 
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nプログラムが中断されました")
+    except Exception as e:
+        print(f"エラーが発生しました: {e}")
+        import traceback
+        traceback.print_exc() 
