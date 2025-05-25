@@ -289,6 +289,8 @@ def main():
         
         # Rerunによる可視化
         if args.rerun:
+            rr.set_time(timestamp=float(i), timeline="frame")
+
             lidar_sim.visualize_with_rerun(
                 current_estimate, scan_points, 
                 target_points=target_points, 
