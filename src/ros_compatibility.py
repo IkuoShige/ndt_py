@@ -150,6 +150,20 @@ except ImportError as e:
         range_max: float = 0.0
         ranges: List[float] = field(default_factory=list)
         intensities: List[float] = field(default_factory=list)
+        
+        @classmethod
+        def from_simulator_data(cls, scan_data: dict, frame_id: str = "laser"):
+            """シミュレーターのスキャンデータからLaserScanメッセージを生成"""
+            return cls(
+                header=Header(stamp=scan_data.get('timestamp', time.time()), frame_id=frame_id),
+                angle_min=scan_data['angle_min'],
+                angle_max=scan_data['angle_max'],
+                angle_increment=scan_data['angle_increment'],
+                range_min=scan_data['range_min'],
+                range_max=scan_data['range_max'],
+                ranges=scan_data['ranges'].tolist() if isinstance(scan_data['ranges'], np.ndarray) else scan_data['ranges'],
+                intensities=scan_data['intensities'].tolist() if isinstance(scan_data['intensities'], np.ndarray) else scan_data['intensities']
+            )
 
     @dataclass
     class PointCloud2:
@@ -163,6 +177,23 @@ except ImportError as e:
         row_step: int = 0
         data: bytes = b''
         is_dense: bool = True
+        
+        @classmethod
+        def from_points(cls, points: np.ndarray, intensities: Optional[np.ndarray] = None, frame_id: str = "laser"):
+            """点群データからPointCloud2メッセージを生成"""
+            if points.size == 0:
+                return cls(header=Header(frame_id=frame_id))
+                
+            if intensities is None:
+                intensities = np.ones(len(points))
+                
+            # 簡略化された実装（実際のROSでは複雑なバイナリ形式）
+            return cls(
+                header=Header(frame_id=frame_id),
+                width=len(points),
+                row_step=len(points) * 12,
+                data=b''  # 実際の実装では点群データをバイナリ化
+            )
 
     @dataclass
     class Odometry:
@@ -171,6 +202,38 @@ except ImportError as e:
         child_frame_id: str = "base_link"
         pose: PoseWithCovariance = field(default_factory=PoseWithCovariance)
         twist: TwistWithCovariance = field(default_factory=TwistWithCovariance)
+        
+        @classmethod
+        def from_pose_and_velocity(cls, pose_2d: np.ndarray, velocity_2d: np.ndarray, 
+                                  covariance: Optional[np.ndarray] = None, frame_id: str = "odom"):
+            """2D姿勢と速度からOdometryメッセージを生成"""
+            x, y, theta = pose_2d
+            linear_vel, angular_vel = velocity_2d
+            
+            # 姿勢の共分散行列を設定
+            pose_cov = [0.0] * 36
+            if covariance is not None and covariance.shape == (3, 3):
+                # 2D共分散を6D共分散行列に埋め込み
+                pose_cov[0] = float(covariance[0, 0])   # x-x
+                pose_cov[1] = float(covariance[0, 1])   # x-y
+                pose_cov[5] = float(covariance[0, 2])   # x-yaw
+                pose_cov[6] = float(covariance[1, 0])   # y-x
+                pose_cov[7] = float(covariance[1, 1])   # y-y
+                pose_cov[11] = float(covariance[1, 2])  # y-yaw
+                pose_cov[30] = float(covariance[2, 0])  # yaw-x
+                pose_cov[31] = float(covariance[2, 1])  # yaw-y
+                pose_cov[35] = float(covariance[2, 2])  # yaw-yaw
+            
+            return cls(
+                header=Header(frame_id=frame_id),
+                pose=PoseWithCovariance(
+                    pose=Pose.from_2d(x, y, theta),
+                    covariance=pose_cov
+                ),
+                twist=TwistWithCovariance(
+                    twist=Twist.from_2d(linear_vel, angular_vel)
+                )
+            )
 
     @dataclass
     class MapMetaData:
@@ -187,6 +250,38 @@ except ImportError as e:
         header: Header = field(default_factory=Header)
         info: MapMetaData = field(default_factory=MapMetaData)
         data: List[int] = field(default_factory=list)
+        
+        @classmethod
+        def from_occupancy_map(cls, occupancy_map, frame_id: str = "map"):
+            """占有格子地図からOccupancyGridメッセージを生成"""
+            binary_map = occupancy_map.get_occupancy_grid()
+            height, width = binary_map.shape
+            
+            # ROSの占有格子では、0=空き、100=占有、-1=不明
+            ros_data = []
+            for j in range(height):
+                for i in range(width):
+                    if binary_map[j, i] > 0:
+                        ros_data.append(100)  # 占有
+                    else:
+                        ros_data.append(0)    # 空き
+            
+            origin_pose = Pose.from_2d(
+                occupancy_map.origin[0], 
+                occupancy_map.origin[1], 
+                occupancy_map.origin[2] if len(occupancy_map.origin) > 2 else 0.0
+            )
+            
+            return cls(
+                header=Header(frame_id=frame_id),
+                info=MapMetaData(
+                    resolution=occupancy_map.resolution,
+                    width=width,
+                    height=height,
+                    origin=origin_pose
+                ),
+                data=ros_data
+            )
 
     @dataclass
     class Transform:
@@ -288,7 +383,17 @@ class ROS2MessageConverter:
             scan.intensities = [float(i) for i in scan_data['intensities']]
             return scan
         else:
-            return LaserScan.from_simulator_data(scan_data, frame_id)
+            # フォールバック：カスタムLaserScanクラスのクラスメソッドを使用
+            return LaserScan(
+                header=Header(stamp=scan_data.get('timestamp', time.time()), frame_id=frame_id),
+                angle_min=scan_data['angle_min'],
+                angle_max=scan_data['angle_max'],
+                angle_increment=scan_data['angle_increment'],
+                range_min=scan_data['range_min'],
+                range_max=scan_data['range_max'],
+                ranges=scan_data['ranges'].tolist() if isinstance(scan_data['ranges'], np.ndarray) else scan_data['ranges'],
+                intensities=scan_data['intensities'].tolist() if isinstance(scan_data['intensities'], np.ndarray) else scan_data['intensities']
+            )
     
     @staticmethod
     def points_to_ros(points: np.ndarray, intensities: Optional[np.ndarray] = None, 
@@ -320,7 +425,20 @@ class ROS2MessageConverter:
                 # x, yのみの点群
                 return point_cloud2.create_cloud_xyz32(header, points.tolist())
         else:
-            return PointCloud2.from_points(points, intensities, frame_id)
+            # フォールバック：カスタムPointCloud2クラスを使用
+            if points.size == 0:
+                return PointCloud2(header=Header(frame_id=frame_id))
+                
+            if intensities is None:
+                intensities = np.ones(len(points))
+                
+            # 簡略化された実装
+            return PointCloud2(
+                header=Header(frame_id=frame_id),
+                width=len(points),
+                row_step=len(points) * 12,
+                data=b''  # 実際の実装では点群データをバイナリ化
+            )
     
     @staticmethod
     def create_odometry(pose_2d: np.ndarray, velocity_2d: np.ndarray, 
@@ -356,7 +474,35 @@ class ROS2MessageConverter:
             
             return odom
         else:
-            return Odometry.from_pose_and_velocity(pose_2d, velocity_2d, covariance, frame_id)
+            # フォールバック：カスタムOdometryクラスを使用
+            x, y, theta = pose_2d
+            linear_vel, angular_vel = velocity_2d
+            
+            # 姿勢の共分散行列を設定
+            pose_cov = [0.0] * 36
+            if covariance is not None and covariance.shape == (3, 3):
+                # 2D共分散を6D共分散行列に埋め込み
+                pose_cov[0] = float(covariance[0, 0])   # x-x
+                pose_cov[1] = float(covariance[0, 1])   # x-y
+                pose_cov[5] = float(covariance[0, 2])   # x-yaw
+                pose_cov[6] = float(covariance[1, 0])   # y-x
+                pose_cov[7] = float(covariance[1, 1])   # y-y
+                pose_cov[11] = float(covariance[1, 2])  # y-yaw
+                pose_cov[30] = float(covariance[2, 0])  # yaw-x
+                pose_cov[31] = float(covariance[2, 1])  # yaw-y
+                pose_cov[35] = float(covariance[2, 2])  # yaw-yaw
+            
+            return Odometry(
+                header=Header(frame_id=frame_id),
+                child_frame_id=child_frame_id,
+                pose=PoseWithCovariance(
+                    pose=Pose.from_2d(x, y, theta),
+                    covariance=pose_cov
+                ),
+                twist=TwistWithCovariance(
+                    twist=Twist.from_2d(linear_vel, angular_vel)
+                )
+            )
     
     @staticmethod
     def occupancy_map_to_ros(occupancy_map, frame_id: str = "map"):
@@ -390,7 +536,35 @@ class ROS2MessageConverter:
             
             return grid
         else:
-            return OccupancyGrid.from_occupancy_map(occupancy_map, frame_id)
+            # フォールバック：カスタムOccupancyGridクラスを使用
+            binary_map = occupancy_map.get_occupancy_grid()
+            height, width = binary_map.shape
+            
+            # ROSの占有格子では、0=空き、100=占有、-1=不明
+            ros_data = []
+            for j in range(height):
+                for i in range(width):
+                    if binary_map[j, i] > 0:
+                        ros_data.append(100)  # 占有
+                    else:
+                        ros_data.append(0)    # 空き
+            
+            origin_pose = Pose.from_2d(
+                occupancy_map.origin[0], 
+                occupancy_map.origin[1], 
+                occupancy_map.origin[2] if len(occupancy_map.origin) > 2 else 0.0
+            )
+            
+            return OccupancyGrid(
+                header=Header(frame_id=frame_id),
+                info=MapMetaData(
+                    resolution=occupancy_map.resolution,
+                    width=width,
+                    height=height,
+                    origin=origin_pose
+                ),
+                data=ros_data
+            )
     
     @staticmethod
     def create_transform_2d(from_frame: str, to_frame: str, 
@@ -416,6 +590,8 @@ class ROS2MessageConverter:
             
             return t
         else:
+            # フォールバック：カスタムTransformStampedクラスを使用
+            x, y = translation
             return TransformStamped(
                 header=Header(frame_id=from_frame),
                 child_frame_id=to_frame,
